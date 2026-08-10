@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+callmemaybe-venv/
+
+# uv
+.uv/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Output files
+data/output/
+output.json
+
+# If you ever download the model weights locally instead of using goinfre
+.cache/
