@@ -1,34 +1,86 @@
+"""Loads and manages function definitions."""
 import json
-from typing import Dict, Any, List
+from typing import Any, Dict, List
+from pydantic import BaseModel, ConfigDict
 
-class FunctionRegistry:
+from src.models import FunctionDef
+
+
+class FunctionRegistry(BaseModel):
+    """Loads and manages the function definitions.
+
+    Reads functions_definition.json and provides lookup methods
+    for function names, descriptions, and parameters.
     """
-    Loads and manages the function definitions from functions_definition.json.
-    This tells the State Machine what functions are available and what parameters they need.
-    """
-    def __init__(self):
-        self.functions: Dict[str, Dict[str, Any]] = {}
-        
-    def load(self, path: str):
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    functions: Dict[str, FunctionDef] = {}
+
+    def __init__(self, **data: Any) -> None:
+        """Initialize an empty registry."""
+        super().__init__(**data)
+
+    def load(self, path: str) -> None:
+        """Load function definitions from a JSON file.
+
+        Args:
+            path: Path to the functions_definition.json file.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            json.JSONDecodeError: If the file contains invalid JSON.
+        """
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-            
-        # Store functions by their name for easy lookup
+
         for fn in data:
-            self.functions[fn["name"]] = fn
-            
+            validated = FunctionDef.model_validate(fn)
+            self.functions[validated.name] = validated
+
     def get_functions_name(self) -> List[str]:
+        """Return a list of all registered function names."""
         return list(self.functions.keys())
-        
+
     def get_description(self, name: str) -> str:
-        return self.functions.get(name, {}).get("description", "")
-        
+        """Return the description of a function.
+
+        Args:
+            name: The function name.
+
+        Returns:
+            The description string, or empty string if not found.
+        """
+        fn = self.functions.get(name)
+        if fn is None:
+            return ""
+        return fn.description
+
     def get_parameters(self, name: str) -> Dict[str, Any]:
+        """Return a dict of parameter names to their type info.
+
+        Args:
+            name: The function name.
+
+        Returns:
+            A dict like {'a': {'type': 'number'}, 'b': {'type': 'number'}}.
         """
-        Returns a dict of parameter names to their type info.
-        Example: {'a': {'type': 'number'}, 'b': {'type': 'number'}}
-        """
-        return self.functions.get(name, {}).get("parameters", {})
-        
+        fn = self.functions.get(name)
+        if fn is None:
+            return {}
+        return {
+            k: v.model_dump() for k, v in fn.parameters.items()
+        }
+
     def get_parameter_names(self, name: str) -> List[str]:
-        return list(self.get_parameters(name).keys())
+        """Return a list of parameter names for a function.
+
+        Args:
+            name: The function name.
+
+        Returns:
+            A list of parameter name strings.
+        """
+        fn = self.functions.get(name)
+        if fn is None:
+            return []
+        return list(fn.parameters.keys())
