@@ -1,27 +1,41 @@
-"""Loads and manages function definitions."""
+"""Loads and manages function definitions.
+
+This module reads the functions_definition.json file and provides
+lookup methods for function names, descriptions, and parameters.
+The FunctionRegistry is used by the FSM to know which functions
+exist and what parameters they expect.
+"""
 import json
 from typing import Any, Dict, List
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 from src.models import FunctionDef
 
 
 class FunctionRegistry(BaseModel):
-    """Loads and manages the function definitions.
+    """Stores and provides access to function definitions.
 
-    Reads functions_definition.json and provides lookup methods
-    for function names, descriptions, and parameters.
+    After loading a JSON file of function definitions, this class
+    provides methods to look up function names, descriptions,
+    parameter names, and parameter types.
+
+    Example function definition:
+        {
+            "name": "fn_add_numbers",
+            "description": "Add two numbers together.",
+            "parameters": {"a": {"type": "number"}, "b": {"type": "number"}},
+            "returns": {"type": "number"}
+        }
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    # Maps function name -> FunctionDef for all loaded functions
     functions: Dict[str, FunctionDef] = {}
-
-    def __init__(self, **data: Any) -> None:
-        """Initialize an empty registry."""
-        super().__init__(**data)
 
     def load(self, path: str) -> None:
         """Load function definitions from a JSON file.
+
+        Reads the file, validates each function definition using
+        Pydantic, and stores them in the functions dict.
 
         Args:
             path: Path to the functions_definition.json file.
@@ -38,14 +52,17 @@ class FunctionRegistry(BaseModel):
             self.functions[validated.name] = validated
 
     def get_functions_name(self) -> List[str]:
-        """Return a list of all registered function names."""
+        """Return a list of all registered function names.
+
+        Example return: ['fn_add_numbers', 'fn_greet', 'fn_reverse_string']
+        """
         return list(self.functions.keys())
 
     def get_description(self, name: str) -> str:
         """Return the description of a function.
 
         Args:
-            name: The function name.
+            name: The function name to look up.
 
         Returns:
             The description string, or empty string if not found.
@@ -56,13 +73,14 @@ class FunctionRegistry(BaseModel):
         return fn.description
 
     def get_parameters(self, name: str) -> Dict[str, Any]:
-        """Return a dict of parameter names to their type info.
+        """Return parameter info for a function.
 
         Args:
-            name: The function name.
+            name: The function name to look up.
 
         Returns:
             A dict like {'a': {'type': 'number'}, 'b': {'type': 'number'}}.
+            Returns empty dict if function not found.
         """
         fn = self.functions.get(name)
         if fn is None:
@@ -72,13 +90,13 @@ class FunctionRegistry(BaseModel):
         }
 
     def get_parameter_names(self, name: str) -> List[str]:
-        """Return a list of parameter names for a function.
+        """Return just the parameter names for a function (in order).
 
         Args:
-            name: The function name.
+            name: The function name to look up.
 
         Returns:
-            A list of parameter name strings.
+            A list like ['a', 'b']. Returns empty list if not found.
         """
         fn = self.functions.get(name)
         if fn is None:
