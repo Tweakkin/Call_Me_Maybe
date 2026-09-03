@@ -44,12 +44,15 @@ class VocabManager(BaseModel):
     _boolean_tokens: List[int] = []
     _comma_tokens: List[int] = []
     _close_brace_tokens: List[int] = []
+    _fn_candidates: Dict[int, str] = {}
 
-    def __init__(self, vocab_path: str) -> None:
+    def __init__(self, vocab_path: str, fn_names: List[str] = []) -> None:
         """Load vocabulary and build all cached token lists in one pass.
 
         Args:
             vocab_path: Path to the model's vocab.json file.
+            fn_names: List of valid function names. Used to pre-filter
+                      tokens that could appear in a function name.
         """
         super().__init__()
 
@@ -58,6 +61,13 @@ class VocabManager(BaseModel):
         # Keys are BPE token strings, values are token IDs.
         with open(vocab_path, "r", encoding="utf-8") as f:
             raw_vocab: Dict[str, int] = json.load(f)
+
+        # Collect every character that appears in any function name,
+        # plus the closing quote. Used to filter fn_candidates below.
+        valid_chars: set = set()
+        for fn_name in fn_names:
+            valid_chars.update(fn_name)
+        valid_chars.add('"')
 
         # The targets we check against when building boolean tokens.
         bool_targets = ["true", "false", "true,", "false,", "true}", "false}"]
@@ -99,6 +109,10 @@ class VocabManager(BaseModel):
             if '"' not in text and not any(ord(c) < 32 for c in text):
                 self._string_tokens.append(token_id)
 
+            # Function name candidate: every character is in valid_chars
+            if fn_names and all(c in valid_chars for c in text):
+                self._fn_candidates[token_id] = text
+
     def get_token_text(self, token_id: int) -> str:
         """Return the decoded text for a token ID.
 
@@ -109,6 +123,10 @@ class VocabManager(BaseModel):
     def get_all_tokens(self) -> Dict[int, str]:
         """Return the full token_id -> text dictionary."""
         return self.decoded_vocab
+
+    def get_fn_candidates(self) -> Dict[int, str]:
+        """Return pre-filtered tokens that could appear in a function name."""
+        return self._fn_candidates
 
     def get_number_tokens(self) -> List[int]:
         """Return cached token IDs for number parts (digits, dot, minus)."""

@@ -1,46 +1,33 @@
 """Finite State Machine for constrained JSON generation.
 
-The FSM tracks where we are in building a JSON function call and tells
-the generation loop which tokens are valid at each step. This ensures
-the output is always valid JSON that matches the function schema.
+Tracks where we are in building a JSON function call and tells the
+generation loop which tokens are valid at each step.
 
-The JSON structure we're building looks like:
+The JSON we're building looks like:
     {"name": "fn_add_numbers", "parameters": {"a": 2, "b": 3}}
 
-How it works:
-- Structural parts (like {"name": " or , "parameters": {) are FORCED:
-  the FSM encodes them into token IDs and emits them one at a time.
-  The AI has no choice here, and we skip the expensive model call.
-- Value parts (function name, parameter values) are FREE: the AI picks
-  from a filtered set of valid tokens using logit masking.
+Structural parts (like {"name": ") are FORCED one token at a time.
+Value parts (function name, parameter values) are FREE — the AI picks
+from a filtered set of valid tokens.
 
 States:
     EXPECT_START         -> Forces the opening: {"name": "
-    FORCING_SEQUENCE     -> Forces a specific sequence of tokens
-    EXPECT_FUNCTION_NAME -> AI picks tokens to build a valid function name
-    EXPECT_NEXT_PARAM    -> Transitions to next parameter or closes JSON
-    EXPECT_NUMBER_VALUE  -> AI picks number tokens for a number parameter
+    FORCING_SEQUENCE     -> Forces a specific token sequence
+    EXPECT_FUNCTION_NAME -> AI picks tokens to build a function name
+    EXPECT_NEXT_PARAM    -> Moves to next parameter or closes JSON
+    EXPECT_NUMBER_VALUE  -> AI picks number tokens
     EXPECT_BOOLEAN_VALUE -> AI picks boolean tokens
-    EXPECT_STRING_VALUE  -> AI picks string tokens for a string parameter
+    EXPECT_STRING_VALUE  -> AI picks string tokens
     DONE                 -> Generation complete
 """
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List
 
 from src.vocab import VocabManager
 from src.registry import FunctionRegistry
 
 
 class JSONStateMachine:
-    """Tracks position in JSON structure and returns allowed tokens.
-
-    The FSM forces structural parts as exact token sequences, and lets
-    the AI choose freely only for values (function name, parameter
-    values). This guarantees valid JSON output every time.
-    """
-
-    # Maximum number of tokens allowed for a single string value.
-    # This prevents the model from generating infinitely long strings.
-    MAX_STRING_TOKENS: int = 50
+    """Tracks position in JSON and returns allowed tokens at each step."""
 
     def __init__(
         self,
@@ -51,7 +38,7 @@ class JSONStateMachine:
         """Initialize the state machine.
 
         Args:
-            ai: The LLM model instance (used for encode() on forced text).
+            ai: The LLM model (used for encode() on forced text).
             vocab: The vocabulary manager with cached token lists.
             registry: The function registry with available functions.
         """
@@ -59,355 +46,174 @@ class JSONStateMachine:
         self.vocab = vocab
         self.registry = registry
 
-        # Current state of the FSM
+        # Current FSM state
         self.state: str = "EXPECT_START"
 
-        # Which function the AI chose (set after function name is done)
-        self.chosen_function: Optional[str] = None
+        # Which function the AI chose
+        self.chosen_function: str = ""
 
-        # --- Forced sequence tracking ---
-        # When we need to force exact text (like '{"name": "'), we
-        # encode it into token IDs and force them one at a time.
+        # Forced sequence tracking — when we force exact text like
+        # {"name": ", we encode it into token IDs and emit one at a time
         self.sequence_to_force: List[int] = []
         self.sequence_index: int = 0
-        self.next_state_after_sequence: Optional[str] = None
+        self.next_state: str = ""
 
-        # --- Function name tracking ---
+        # Function name tracking
         self.valid_functions: List[str] = registry.get_functions_name()
-        # Text built so far while the AI picks function name tokens
         self.current_fn_string: str = ""
-        # Pre-filtered vocab: only tokens whose characters could appear
-        # in a function name. Cuts search from 150K+ to a few hundred.
-        self._fn_name_candidates: Dict[int, str] = (
-            self._build_fn_name_candidates()
-        )
 
-        # --- Parameter tracking ---
-        # Queue of parameter names still to process (in order)
+        # Pre-filtered tokens that could appear in a function name.
+        # Built during VocabManager's single pass — no extra loop needed.
+        self.fn_candidates: Dict[int, str] = vocab.get_fn_candidates()
+
+        # Parameter tracking
         self.params_queue: List[str] = []
-        # Type of the current parameter being generated
-        # How many tokens generated for the current string value
-        self.string_value_length: int = 0
-
-    def _build_fn_name_candidates(self) -> Dict[int, str]:
-        """Pre-filter the vocab to only tokens useful for function names.
-
-        We collect all characters that appear in any function name (like
-        a-z, _, 0-9), plus the closing quote. Then we keep only tokens
-        whose text is made entirely of those characters.
-
-        This typically cuts the search from 150K+ tokens to a few hundred,
-        which makes _get_fn_name_tokens() much faster.
-
-        Returns:
-            A dict of {token_id: token_text} for candidate tokens.
-        """
-        # Collect every character used in any function name
-        valid_chars: Set[str] = set()
-        for fn_name in self.valid_functions:
-            valid_chars.update(fn_name)
-        # Also allow the closing quote (marks end of function name)
-        valid_chars.add('"')
-
-        # Keep only tokens whose text contains only valid_chars
-        candidates: Dict[int, str] = {}
-        for t_id, t_text in self.vocab.get_all_tokens().items():
-            if t_text and all(c in valid_chars for c in t_text):
-                candidates[t_id] = t_text
-        return candidates
+        self.string_token_count: int = 0
+        self.max_string_tokens: int = 50
 
     def _force_string(self, text: str, next_state: str) -> None:
-        """Set up a forced token sequence.
+        """Encode text into token IDs and force them one at a time.
 
-        The given text is encoded into token IDs using the model's
-        tokenizer. The FSM will force these tokens one at a time.
         Since forced tokens have only one valid choice, the main loop
         skips the expensive model call for them.
-
-        Args:
-            text: The exact text to force (e.g., '{"name": "').
-            next_state: The state to go to after the sequence is done.
         """
         encoded = self.ai.encode(text)
         self.sequence_to_force = encoded[0].tolist()
         self.sequence_index = 0
         self.state = "FORCING_SEQUENCE"
-        self.next_state_after_sequence = next_state
+        self.next_state = next_state
+
+    def _setup_param(self, p_name: str, prefix: str) -> None:
+        """Force a parameter key and transition to the right value state.
+
+        Args:
+            p_name: The parameter name (like "a" or "b").
+            prefix: Text before the parameter name (like ', ').
+        """
+        fn = self.chosen_function
+        p_type = self.registry.get_parameters(fn)[p_name]["type"]
+
+        if p_type == "string":
+            self._force_string(
+                f'{prefix}"{p_name}": "', "EXPECT_STRING_VALUE"
+            )
+        elif p_type == "boolean":
+            self._force_string(
+                f'{prefix}"{p_name}": ', "EXPECT_BOOLEAN_VALUE"
+            )
+        else:
+            self._force_string(
+                f'{prefix}"{p_name}": ', "EXPECT_NUMBER_VALUE"
+            )
 
     def get_allowed_tokens(self) -> List[int]:
-        """Return the list of token IDs the AI is allowed to pick from.
+        """Return token IDs the AI is allowed to pick from.
 
-        This is the core of constrained decoding. Based on the current
-        state, we return only tokens that would maintain valid JSON.
-
-        Returns:
-            A list of allowed token IDs.
+        Based on the current state, returns only tokens that would
+        keep the JSON valid.
         """
         if self.state == "EXPECT_START":
-            # Begin the JSON: force {"name": "
             self._force_string('{"name": "', "EXPECT_FUNCTION_NAME")
-            return self.get_allowed_tokens()
+            return [self.sequence_to_force[0]]
 
         if self.state == "FORCING_SEQUENCE":
-            # Only one token allowed: the next in the forced sequence
             return [self.sequence_to_force[self.sequence_index]]
 
         if self.state == "EXPECT_FUNCTION_NAME":
-            return self._get_fn_name_tokens()
+            # Check each candidate token to see if appending it
+            # would still be a prefix of some valid function name
+            allowed: List[int] = []
+            for t_id, t_text in self.fn_candidates.items():
+                potential = self.current_fn_string + t_text
+                for fn in self.valid_functions:
+                    if fn.startswith(potential):
+                        allowed.append(t_id)
+                        break
+                    if (fn + '"').startswith(potential):
+                        allowed.append(t_id)
+                        break
+            return allowed
 
         if self.state == "EXPECT_NEXT_PARAM":
-            return self._handle_next_param()
+            if len(self.params_queue) == 0:
+                # All parameters done — close with }}
+                self._force_string("}}", "DONE")
+            else:
+                p_name = self.params_queue.pop(0)
+                self._setup_param(p_name, ", ")
+            return [self.sequence_to_force[0]]
 
         if self.state == "EXPECT_NUMBER_VALUE":
-            return self._get_number_value_tokens()
+            # Number tokens + terminator (} if last param, , if more)
+            allowed = list(self.vocab.get_number_tokens())
+            if len(self.params_queue) == 0:
+                allowed.extend(self.vocab.get_close_brace_tokens())
+            else:
+                allowed.extend(self.vocab.get_comma_tokens())
+            return allowed
 
         if self.state == "EXPECT_BOOLEAN_VALUE":
-            return self._get_boolean_value_tokens()
+            return list(self.vocab.get_boolean_tokens())
 
         if self.state == "EXPECT_STRING_VALUE":
-            return self._get_string_value_tokens()
+            # If string is too long, force it to close with a quote
+            if self.string_token_count >= self.max_string_tokens:
+                return list(self.vocab.get_quote_tokens())
+            # Otherwise allow any string-safe token + closing quote
+            allowed = list(self.vocab.get_string_tokens())
+            allowed.extend(self.vocab.get_quote_tokens())
+            return allowed
 
         return []
 
-    def _get_fn_name_tokens(self) -> List[int]:
-        """Find tokens that build towards a valid function name.
-
-        We check each candidate token (pre-filtered at init) to see if
-        appending it to the current function name text would still be a
-        prefix of some valid function name (or complete it with a quote).
-
-        Returns:
-            A list of allowed token IDs.
-        """
-        allowed: List[int] = []
-        for t_id, t_text in self._fn_name_candidates.items():
-            # What the name would look like if we added this token
-            potential = self.current_fn_string + t_text
-            for fn in self.valid_functions:
-                # Does any function name start with this text?
-                if fn.startswith(potential):
-                    allowed.append(t_id)
-                    break
-                # Does this complete a function name with closing quote?
-                if (fn + '"').startswith(potential):
-                    allowed.append(t_id)
-                    break
-        return allowed
-
-    def _handle_next_param(self) -> List[int]:
-        """Move to the next parameter, or close the JSON if all done.
-
-        If there are more parameters in the queue, force the key text
-        (like , "b": ) and transition to the appropriate value state.
-        If all parameters are done, force the closing braces }}.
-
-        Returns:
-            A list of allowed token IDs.
-        """
-        if len(self.params_queue) == 0:
-            # All parameters done — close both the parameters object
-            # and the outer object with }}
-            self._force_string("}}", "DONE")
-        else:
-            # Get the next parameter from the queue
-            p_name = self.params_queue.pop(0)
-            fn = self.chosen_function or ""
-            p_type = self.registry.get_parameters(fn)[p_name]["type"]
-
-            # Force the parameter key, then let the AI pick the value
-            if p_type == "string":
-                self._force_string(
-                    f', "{p_name}": "', "EXPECT_STRING_VALUE"
-                )
-            elif p_type == "boolean":
-                self._force_string(
-                    f', "{p_name}": ', "EXPECT_BOOLEAN_VALUE"
-                )
-            else:
-                # Default to number
-                self._force_string(
-                    f', "{p_name}": ', "EXPECT_NUMBER_VALUE"
-                )
-        return self.get_allowed_tokens()
-
-    def _get_number_value_tokens(self) -> List[int]:
-        """Get allowed tokens for a number parameter value.
-
-        Allows number tokens (digits, dots, minus) plus a terminator
-        that signals the end of the number:
-        - '}' if this is the last parameter
-        - ',' if there are more parameters after this one
-
-        Uses cached terminator token lists (built at startup in
-        VocabManager) instead of scanning all 150K+ tokens each time.
-
-        Returns:
-            A list of allowed token IDs.
-        """
-        # Start with all number tokens
-        allowed: List[int] = list(self.vocab.get_number_tokens())
-
-        # Add the right terminator tokens from the cached lists
-        if len(self.params_queue) == 0:
-            # Last parameter: allow '}' to close parameters object
-            allowed.extend(self.vocab.get_close_brace_tokens())
-        else:
-            # More parameters coming: allow ',' to separate them
-            allowed.extend(self.vocab.get_comma_tokens())
-        return allowed
-
-    def _get_boolean_value_tokens(self) -> List[int]:
-        """Get allowed tokens for a boolean parameter value.
-
-        Returns:
-            A list of boolean token IDs (true/false and variants).
-        """
-        return list(self.vocab.get_boolean_tokens())
-
-    def _get_string_value_tokens(self) -> List[int]:
-        """Get allowed tokens for a string parameter value.
-
-        Allows any string-safe token plus the closing quote.
-        If the string has hit MAX_STRING_TOKENS, only the closing
-        quote is allowed (forces the string to end).
-
-        Returns:
-            A list of allowed token IDs.
-        """
-        if self.string_value_length >= self.MAX_STRING_TOKENS:
-            # String too long — force it to close with a quote
-            return list(self.vocab.get_quote_tokens())
-
-        # Allow any string-safe token plus the closing quote
-        allowed: List[int] = list(self.vocab.get_string_tokens())
-        allowed.extend(self.vocab.get_quote_tokens())
-        return allowed
-
     def commit(self, t_id: int, text: str) -> None:
-        """Update the FSM state after a token has been picked.
+        """Update the FSM after a token has been picked.
 
-        Called after each token is generated. Advances the FSM to the
-        next state based on what was picked.
-
-        Args:
-            t_id: The chosen token ID.
-            text: The decoded text of the chosen token.
+        Called after each token is generated. Advances the state
+        based on what token was picked.
         """
         if self.state == "FORCING_SEQUENCE":
-            # Move to the next token in the forced sequence
             self.sequence_index += 1
             if self.sequence_index >= len(self.sequence_to_force):
-                # Forced sequence complete — move to next state
-                self.state = self.next_state_after_sequence or "DONE"
+                self.state = self.next_state
 
         elif self.state == "EXPECT_FUNCTION_NAME":
-            self._commit_fn_name(text)
+            self.current_fn_string += text
 
-        elif self.state == "EXPECT_NUMBER_VALUE":
-            self._commit_number_or_bool(text)
+            # Check if function name is complete (ends with ")
+            if self.current_fn_string.endswith('"'):
+                # Strip the closing quote to get the function name
+                self.chosen_function = self.current_fn_string[:-1]
+                fn = self.chosen_function
+                self.params_queue = self.registry.get_parameter_names(fn)
 
-        elif self.state == "EXPECT_BOOLEAN_VALUE":
-            self._commit_number_or_bool(text)
+                if len(self.params_queue) == 0:
+                    # No parameters — force empty parameters object
+                    self._force_string(
+                        ', "parameters": {', "EXPECT_NEXT_PARAM"
+                    )
+                else:
+                    # Set up the first parameter
+                    p_name = self.params_queue.pop(0)
+                    self._setup_param(
+                        p_name, ', "parameters": {'
+                    )
+
+        elif self.state in ("EXPECT_NUMBER_VALUE", "EXPECT_BOOLEAN_VALUE"):
+            # Check if the value ended with a terminator
+            terminator = "}" if len(self.params_queue) == 0 else ","
+            if terminator in text:
+                if len(self.params_queue) == 0:
+                    # Last parameter — done (outer } added later)
+                    self.state = "DONE"
+                else:
+                    # More parameters — set up the next one
+                    p_name = self.params_queue.pop(0)
+                    self._setup_param(p_name, " ")
 
         elif self.state == "EXPECT_STRING_VALUE":
-            # Count tokens in the current string value
-            self.string_value_length += 1
+            self.string_token_count += 1
             if '"' in text:
                 # Closing quote found — string value is done
-                self.string_value_length = 0
+                self.string_token_count = 0
                 self.state = "EXPECT_NEXT_PARAM"
-
-    def _commit_fn_name(self, text: str) -> None:
-        """Process a function name token.
-
-        Appends the token text to the name being built. When a closing
-        quote (") is found, the name is complete and we set up the
-        parameters section.
-
-        Args:
-            text: The decoded token text.
-        """
-        self.current_fn_string += text
-
-        # Not done yet if there's no closing quote
-        if not self.current_fn_string.endswith('"'):
-            return
-
-        # Function name complete — strip the closing quote
-        self.chosen_function = self.current_fn_string[:-1]
-        fn = self.chosen_function
-
-        # Get the parameter names for this function (in order)
-        self.params_queue = self.registry.get_parameter_names(fn)
-
-        if len(self.params_queue) == 0:
-            # No parameters — force empty parameters object
-            self._force_string(
-                ', "parameters": {', "EXPECT_NEXT_PARAM"
-            )
-        else:
-            # Set up the first parameter
-            p_name = self.params_queue.pop(0)
-            p_type = self.registry.get_parameters(fn)[p_name]["type"]
-
-            # Force the parameters key and first parameter name,
-            # then let AI pick the value
-            if p_type == "string":
-                self._force_string(
-                    f', "parameters": {{"{p_name}": "',
-                    "EXPECT_STRING_VALUE",
-                )
-            elif p_type == "boolean":
-                self._force_string(
-                    f', "parameters": {{"{p_name}": ',
-                    "EXPECT_BOOLEAN_VALUE",
-                )
-            else:
-                self._force_string(
-                    f', "parameters": {{"{p_name}": ',
-                    "EXPECT_NUMBER_VALUE",
-                )
-
-    def _commit_number_or_bool(self, text: str) -> None:
-        """Process a number or boolean value token.
-
-        Checks if the token contains a terminator (} or ,). If yes,
-        the value is complete and we either finish or move to the
-        next parameter.
-
-        Note: when the last parameter is a number/bool and ends with '}',
-        that '}' only closes the inner parameters object. The outer '}'
-        is added by post-processing in __main__.py.
-
-        Args:
-            text: The decoded token text.
-        """
-        # Which character signals the end of this value?
-        terminator = "}" if len(self.params_queue) == 0 else ","
-
-        if terminator not in text:
-            # Still generating the number/boolean value
-            return
-
-        if len(self.params_queue) == 0:
-            # Last parameter — we're done
-            # (outer '}' added by post-processing)
-            self.state = "DONE"
-        else:
-            # More parameters — set up the next one
-            p_name = self.params_queue.pop(0)
-            fn = self.chosen_function or ""
-            p_type = self.registry.get_parameters(fn)[p_name]["type"]
-
-            if p_type == "string":
-                self._force_string(
-                    f' "{p_name}": "', "EXPECT_STRING_VALUE"
-                )
-            elif p_type == "boolean":
-                self._force_string(
-                    f' "{p_name}": ', "EXPECT_BOOLEAN_VALUE"
-                )
-            else:
-                self._force_string(
-                    f' "{p_name}": ', "EXPECT_NUMBER_VALUE"
-                )

@@ -27,3 +27,6 @@ output.json
 
 # If you ever download the model weights locally instead of using goinfre
 .cache/
+
+# Type checker cache
+.mypy_cache/
