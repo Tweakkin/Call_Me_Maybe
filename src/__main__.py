@@ -156,7 +156,7 @@ def main() -> None:
         # ex : [ {"prompt": "What is 2+2?"}, {"prompt": "Say hello"} ]
         raw_tests = json.load(f)
     # Pydantic validate if dict has key named prompt, and type str
-    tests = [PromptInput.model_validate(t) for t in raw_tests]
+    prompts = [PromptInput.model_validate(t) for t in raw_tests]
 
     # Initialize the AI model and vocabulary
     print("Initializing LLM...")
@@ -173,14 +173,14 @@ def main() -> None:
     results: List[Dict[str, Any]] = []
 
     # Main Engine Loop, Goes through My prompts One by One
-    for i, test in enumerate(tests):
-        print(f"\n--- Test {i + 1}/{len(tests)}: {test.prompt} ---")
+    for i, prompt in enumerate(prompts):
+        print(f"\n--- Test {i + 1}/{len(prompts)}: {prompt.prompt} ---")
 
         result = generate_function_call(
-            ai, vocab, registry, test.prompt
+            ai, vocab, registry, prompt.prompt
         )
-        validated = FunctionCall.model_validate(result)
-        results.append(validated.model_dump())
+        FunctionCall.model_validate(result)
+        results.append(result)
         print("SUCCESS")
 
     # Write output

@@ -11,7 +11,7 @@ from typing import Dict, List
 from pydantic import BaseModel
 
 
-def _decode_token(bpe_text: str) -> str:
+def swap_tokens(bpe_text: str) -> str:
     """Convert a raw BPE token string into readable text.
 
     The vocab file stores spaces as the special character 'Ġ' and
@@ -38,13 +38,13 @@ class VocabManager(BaseModel):
     decoded_vocab: Dict[int, str] = {}
 
     # Cached filtered token lists, built once at startup.
-    _number_tokens: List[int] = []
-    _string_tokens: List[int] = []
-    _quote_tokens: List[int] = []
-    _boolean_tokens: List[int] = []
-    _comma_tokens: List[int] = []
-    _close_brace_tokens: List[int] = []
-    _fn_candidates: Dict[int, str] = {}
+    number_tokens: List[int] = []
+    string_tokens: List[int] = []
+    quote_tokens: List[int] = []
+    boolean_tokens: List[int] = []
+    comma_tokens: List[int] = []
+    close_brace_tokens: List[int] = []
+    fn_candidates: Dict[int, str] = {}
 
     def __init__(self, vocab_path: str, fn_names: List[str] = []) -> None:
         """Load vocabulary and build all cached token lists in one pass.
@@ -76,7 +76,7 @@ class VocabManager(BaseModel):
         # This replaces calling ai.decode() 150K+ times (which was slow)
         # and avoids looping through the vocab multiple times.
         for bpe_text, token_id in raw_vocab.items():
-            text = _decode_token(bpe_text)
+            text = swap_tokens(bpe_text)
             self.decoded_vocab[token_id] = text
 
             stripped = text.strip()
@@ -85,33 +85,33 @@ class VocabManager(BaseModel):
 
             # Number token: every character is a digit, dot, or minus
             if all(c in "0123456789.-" for c in stripped):
-                self._number_tokens.append(token_id)
+                self.number_tokens.append(token_id)
 
             # Quote token: just a double-quote character
             if stripped == '"':
-                self._quote_tokens.append(token_id)
+                self.quote_tokens.append(token_id)
 
             # Comma token: only commas and whitespace
             if "," in text and all(c in " \n\r\t," for c in text):
-                self._comma_tokens.append(token_id)
+                self.comma_tokens.append(token_id)
 
             # Close brace token: only '}' and whitespace
             if "}" in text and all(c in " \n\r\t}" for c in text):
-                self._close_brace_tokens.append(token_id)
+                self.close_brace_tokens.append(token_id)
 
             # Boolean token: matches or is a prefix of true/false
             for target in bool_targets:
                 if target.startswith(stripped) or stripped.startswith(target):
-                    self._boolean_tokens.append(token_id)
+                    self.boolean_tokens.append(token_id)
                     break
 
             # String token: no double-quote and no control characters
             if '"' not in text and not any(ord(c) < 32 for c in text):
-                self._string_tokens.append(token_id)
+                self.string_tokens.append(token_id)
 
             # Function name candidate: every character is in valid_chars
             if fn_names and all(c in valid_chars for c in text):
-                self._fn_candidates[token_id] = text
+                self.fn_candidates[token_id] = text
 
     def get_token_text(self, token_id: int) -> str:
         """Return the decoded text for a token ID.
@@ -126,28 +126,28 @@ class VocabManager(BaseModel):
 
     def get_fn_candidates(self) -> Dict[int, str]:
         """Return pre-filtered tokens that could appear in a function name."""
-        return self._fn_candidates
+        return self.fn_candidates
 
     def get_number_tokens(self) -> List[int]:
         """Return cached token IDs for number parts (digits, dot, minus)."""
-        return self._number_tokens
+        return self.number_tokens
 
     def get_string_tokens(self) -> List[int]:
         """Return cached token IDs safe to use inside a JSON string."""
-        return self._string_tokens
+        return self.string_tokens
 
     def get_quote_tokens(self) -> List[int]:
         """Return cached token IDs for the double-quote character."""
-        return self._quote_tokens
+        return self.quote_tokens
 
     def get_boolean_tokens(self) -> List[int]:
         """Return cached token IDs for true/false values."""
-        return self._boolean_tokens
+        return self.boolean_tokens
 
     def get_comma_tokens(self) -> List[int]:
         """Return cached token IDs for commas (parameter separators)."""
-        return self._comma_tokens
+        return self.comma_tokens
 
     def get_close_brace_tokens(self) -> List[int]:
         """Return cached token IDs for '}' (closes the JSON object)."""
-        return self._close_brace_tokens
+        return self.close_brace_tokens
