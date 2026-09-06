@@ -30,6 +30,3 @@ output.json
 
 # Type checker cache
 .mypy_cache/
-
-# Subject PDF (keep local only)
-subject.pdf

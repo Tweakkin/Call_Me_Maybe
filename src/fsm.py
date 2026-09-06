@@ -53,8 +53,7 @@ class JSONStateMachine:
 
     def setup_next_parameter(self, prefix: str, empty_text: str) -> None:
         """Set up the next parameter, or close the JSON if none are left."""
-        if len(self.
-        params_queue) == 0:
+        if len(self.params_queue) == 0:
             if empty_text:
                 self.force_text(empty_text, "DONE")
             else:
